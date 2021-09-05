@@ -1,0 +1,118 @@
+name: 'ZeroTier Action'
+description: 'Joins/Leaves Github Actions from ZeroTier'
+inputs:
+  zerotier-network:  # id of input
+    description: 'Zerotier Network ID'
+    required: true
+    default: ''
+  zerotier-node-authtoken:  # /var/lib/zerotier-one/authtoken.secret
+    description: 'Zerotier Node Authtoken'
+    required: true
+    default: ''
+  zerotier-node-publicidentity:  # /var/lib/zerotier-one/identity.public
+    description: 'Zerotier Node Public Identity'
+    required: true
+    default: ''
+  zerotier-node-secretidentity:  # /var/lib/zerotier-one/identity.secret
+    description: 'Zerotier Node Secret Identity'
+    required: true
+    default: ''
+  zerotier-startup-maxconnect:
+    description: 'Maximum time to wait for ZeroTier to connect to the ZeroTier Central'
+    required: true
+    default: '300'
+  zerotier-startup-maxjoin:
+    description: 'Maximum time to wait for ZeroTier to join a ZeroTier Network'
+    required: true
+    default: '300'
+outputs:
+   zerotier-status:
+     description: "Zerotier Status"
+     value: ${{ steps.zerotier-node-id.outputs.zerotier-status }}
+  
+runs:
+  using: "composite"
+  steps:
+    - name: Mask Secrets
+      run: |
+          echo "::add-mask::${{ inputs.zerotier-node-authtoken }}"
+          echo "::add-mask::${{ inputs.zerotier-node-publicidentity }}"
+          echo "::add-mask::${{ inputs.zerotier-node-secretidentity }}"
+      shell: bash
+    - name: Install ZeroTier
+      run: |
+        echo "==============================================="
+        echo "Running ZeroTier Install"
+        echo "==============================================="
+        if [ ! -f /var/lib/zerotier-one/identity.public ]; then
+          curl -s https://install.zerotier.com | sudo bash
+          sleep 10
+          sudo service zerotier-one stop
+        fi
+      shell: bash
+    - name: Inject ZeroTier Secrets
+      run: |
+        echo "==============================================="
+        echo "Installing ZeroTier node keys"
+        echo "==============================================="
+        sudo rm -rf /var/lib/zerotier-one/*
+        echo -n ${{ inputs.zerotier-node-authtoken }} | sudo tee /var/lib/zerotier-one/authtoken.secret
+        echo -n ${{ inputs.zerotier-node-publicidentity }} | sudo tee /var/lib/zerotier-one/identity.public
+        echo -n ${{ inputs.zerotier-node-secretidentity }} | sudo tee /var/lib/zerotier-one/identity.secret
+        sudo chown -R zerotier-one:zerotier-one /var/lib/zerotier-one/authtoken.secret /var/lib/zerotier-one/identity.public /var/lib/zerotier-one/identity.secret
+        sudo chmod 600 /var/lib/zerotier-one/authtoken.secret
+        sudo chmod 644 /var/lib/zerotier-one/identity.public
+        sudo chmod 600 /var/lib/zerotier-one/identity.secret
+      shell: bash
+    - name: Start ZeroTier
+      run: |
+        echo "==============================================="
+        echo "Starting ZeroTier with new keys"
+        echo "==============================================="
+        sudo service zerotier-one start
+      shell: bash
+    - name: Wait for ZeroTier to connect to ZeroTier Central
+      run: |
+        echo "===================================================="
+        echo "Waiting for ZeroTier to connect to ZeroTier Central"
+        echo "===================================================="
+        while [[ $(sudo zerotier-cli -j status | jq -r '.online') != 'true' ]]
+        do
+          count=0
+          if [[ $count -lt ${{ inputs.zerotier-startup-maxconnect }} ]]; then
+            sleep 10
+            ((count=count+10))
+          else
+            echo "Timeout reached, ZeroTier failed to connect to network"
+            exit 1
+          fi
+        done
+      shell: bash
+    - name: Join ZeroTier Network
+      run: |
+        echo "===================================================="
+        echo "Joining ZeroTier Network"
+        echo "===================================================="
+        sudo zerotier-cli join ${{ inputs.zerotier-network }}
+      shell: bash
+    - name: Wait for ZeroTier to connect to network
+      run: |
+        echo "===================================================="
+        echo "Waiting for ZeroTier to connect to ZeroTier network"
+        echo "===================================================="
+        while [[ $(sudo zerotier-cli listnetworks -j | jq -r '.[] | select(.id=="${{ inputs.zerotier-network }}") | .status') == 'REQUESTING_CONFIGURATION' ]]
+        do
+          count=0
+          if [[ $count -lt ${{ inputs.zerotier-startup-maxjoin }} ]]; then
+            sleep 10
+            ((count=count+10))
+          else
+            echo "Timeout reached, ZeroTier failed to retrieve network configuration"
+            exit 1
+          fi
+        done
+        sudo zerotier-cli listnetworks -j | jq '.[] | select(.id=="${{ inputs.zerotier-network }}") | .status'
+      shell: bash
+    - id: zerotier-status
+      run: echo "::set-output name=zerotier-status::$(sudo zerotier-cli listnetworks -j | jq '.[] | select(.id=="${{ inputs.zerotier-network }}") | .status')"
+      shell: bash
